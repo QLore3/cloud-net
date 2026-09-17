@@ -1,0 +1,17 @@
+#cloud-config
+write_files:
+  - path: /var/www/html/index.html
+    permissions: '0644'
+    content: |
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>LAMP Homework</title>
+      </head>
+      <body>
+        <h1>Домашнее задание</h1>
+        <p>Картинка из Object Storage:</p>
+        <img src="${image_url}" alt="image from bucket">
+      </body>
+      </html>

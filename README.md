@@ -1,8 +1,12 @@
-# Домашняя работа: Terraform — Yandex Cloud
+# Домашняя работа: Object Storage, Instance Group, Network Load Balancer
 
 ## Цель
 
-Создать в Yandex Cloud сетевую инфраструктуру с публичной и приватной подсетями, NAT-инстансом и маршрутизацией трафика из приватной подсети в Интернет.
+Создать в Yandex Cloud:
+
+1. Бакет в Object Storage с публично доступной картинкой.
+2. Группу виртуальных машин с шаблоном LAMP и веб-страницей, содержащей ссылку на картинку из бакета.
+3. Сетевой балансировщик, распределяющий трафик между ВМ группы.
 
 Вся инфраструктура создана и управляется с помощью Terraform.
 
@@ -11,46 +15,41 @@
 ## Схема инфраструктуры
 
 ```text
-                           Internet
-                              │
-                    ┌─────────┴─────────┐
-                    │                   │
-              NAT instance          public-vm
-             192.168.10.254       192.168.10.x
-             62.84.119.222         84.201.156.87
-                    │                   │
-                    └─────────┬─────────┘
-                              │
-                    public subnet
-                    192.168.10.0/24
-                              │
-                    ┌─────────┴─────────┐
-                    │   Route Table     │
-                    │  0.0.0.0/0 →     │
-                    │  192.168.10.254   │
-                    └─────────┬─────────┘
-                              │
-                    private subnet
-                    192.168.20.0/24
-                              │
-                         private-vm
-                        192.168.20.10
-                         no public IP
-                              │
-                              ▼
-                         NAT instance
-                              │
-                              ▼
-                           Internet
+                     Internet
+                        │
+                   ┌────┴────┐
+                   │   LB    │
+                   │ 158.160 │
+                   │.140.125 │
+                   └────┬────┘
+                        │ port 80
+            ┌───────────┼───────────┐
+            │           │           │
+       ┌────┴───┐ ┌────┴───┐ ┌────┴───┐
+       │ lamp-1 │ │ lamp-2 │ │ lamp-3 │
+       │.10.20  │ │ .10.7  │ │.10.21  │
+       └────┬───┘ └────┬───┘ └────┬───┘
+            │           │           │
+            └───────────┼───────────┘
+                        │
+                 public subnet
+                 192.168.10.0/24
+                        │
+                  homework-vpc
+                        │
+            ┌───────────┴───────────┐
+            │                       │
+     Object Storage          Instance Group
+     bucket: netology-       lamp-group (3 VM)
+     homework-lamp-2026      LAMP image
+     image.jpg (public)      user-data: index.html
 ```
 
 ---
 
 ## 1. VPC и публичная подсеть
 
-Создана пустая VPC `homework-vpc`.
-
-Публичная подсеть:
+Создана VPC `homework-vpc` и публичная подсеть:
 
 * имя: `public`
 * CIDR: `192.168.10.0/24`
@@ -60,216 +59,174 @@
 
 ---
 
-## 2. NAT-инстанс
+## 2. Object Storage — бакет с картинкой
 
-Создан NAT-инстанс:
+Создан бакет:
 
-* имя: `nat-instance`
-* внутренний IP: `192.168.10.254`
-* публичный IP: `62.84.119.222`
-* подсеть: `public`
-* Marketplace image ID: `fd80mrhj8fl2oe87o4e1`
+* имя: `netology-homework-lamp-2026`
+* анонимный доступ: `read` (включён через `yc storage bucket update`)
+* файл: `image.jpg` (картинка с котиком)
 
-Конфигурация находится в [`nat.tf`](./nat.tf).
+Публичный URL файла:
+
+```
+https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg
+```
+
+Для доступа к бакету создан отдельный Service Account `storage-sa` с ролью `storage.admin` и статический ключ доступа.
+
+Конфигурация находится в [`storage.tf`](./storage.tf).
 
 ---
 
-## 3. Публичная VM
+## 3. Группа виртуальных машин (Instance Group)
 
-Создана виртуальная машина `public-vm`.
+Создана Instance Group `lamp-group` с тремя ВМ:
 
-Параметры:
+| Параметр         | Значение                      |
+| ---------------- | ----------------------------- |
+| Шаблон          | LAMP (`fd827b91d99psvq5fjit`) |
+| Платформа        | `standard-v3`                 |
+| CPU / RAM        | 2 cores / 2 GB                |
+| Диск             | 20 GB `network-hdd`           |
+| Подсеть          | `public` (192.168.10.0/24)    |
+| NAT              | включён (публичные IP)        |
+| Количество ВМ    | 3 (фиксированное масштабирование) |
 
-* подсеть: `public`
-* публичный IP: `84.201.156.87`
-* ОС: Ubuntu 22.04 LTS
-* доступ по SSH осуществляется с локального компьютера.
+### Стартовая веб-страница
 
-Конфигурация находится в [`public-vm.tf`](./public-vm.tf).
+Через `user-data` (cloud-init) на каждой ВМ создаётся файл `/var/www/html/index.html` со ссылкой на картинку из бакета:
 
-### Проверка доступа в Интернет
+```html
+<img src="https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg">
+```
 
-С `public-vm` выполнена проверка:
+### Проверка состояния ВМ (Health Check)
+
+Настроена HTTP-проверка:
+
+* порт: 80
+* путь: `/`
+* интервал: 10 сек
+* таймаут: 5 сек
+* healthy threshold: 2
+* unhealthy threshold: 3
+
+Конфигурация находится в [`instance-group.tf`](./instance-group.tf), шаблон страницы — в [`files/user-data.yaml`](./files/user-data.yaml).
+
+---
+
+## 4. Сетевой балансировщик
+
+Создан Network Load Balancer `lamp-load-balancer`:
+
+| Параметр     | Значение         |
+| ------------ | ---------------- |
+| Тип          | `EXTERNAL`       |
+| Протокол     | TCP              |
+| Порт         | 80               |
+| Target port  | 80               |
+| Внешний IP   | `158.160.140.125`|
+
+Балансировщик привязан к target group, автоматически управляемой Instance Group. Health check на стороне балансировщика: HTTP порт 80, путь `/`.
+
+Конфигурация находится в [`loadbalancer.tf`](./loadbalancer.tf).
+
+---
+
+## 5. Проверка работоспособности
+
+### Веб-страница через балансировщик
+
+Откройте в браузере:
+
+```
+http://158.160.140.125/
+```
+
+Отобразится страница «Домашнее задание» с картинкой из Object Storage.
+
+![Веб-страница через LB](./img/img1.png)
+
+### Картинка из бакета напрямую
+
+```
+https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg
+```
+
+![Картинка из бакета](./img/img2.png)
+
+### Удаление одной ВМ
+
+Удалите одну ВМ из группы через консоль или CLI:
 
 ```bash
-curl 2ip.me
+yc compute instance delete <instance-id>
 ```
 
-Результат показывает доступ в Интернет и публичный IP `84.201.156.87`.
+После удаления балансировщик перестаёт отправлять трафик на удалённую ВМ. Оставшиеся две ВМ продолжают обрабатывать запросы. Health check подтверждает, что удалённая ВМ недоступна.
 
-![Проверка Internet на public-vm](./img/img4.png)
+![Удаление ВМ из группы](./img/img3.png)
+
+### Восстановление ВМ
+
+Instance Group автоматически создаёт новую ВМ взамен удалённой (fixed scale = 3). После восстановления балансировщик начинает распределять трафик между тремя ВМ.
+
+![Восстановление ВМ](./img/img4.png)
 
 ---
 
-## 4. Приватная подсеть
-
-Создана приватная подсеть:
-
-* имя: `private`
-* CIDR: `192.168.20.0/24`
-* зона: `ru-central1-a`
-
-Для приватной подсети создана таблица маршрутизации:
+## 6. Terraform outputs
 
 ```text
-0.0.0.0/0 → 192.168.10.254
+bucket_name = "netology-homework-lamp-2026"
+image_url = "https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg"
+lamp_group_instances = ["<id-1>", "<id-2>", "<id-3>"]
+load_balancer_address = [["158.160.140.125"]]
 ```
 
-Route table привязана только к приватной подсети.
-
-Конфигурация находится в:
-
-* [`network.tf`](./network.tf)
-* [`route.tf`](./route.tf)
+![Terraform output](./img/img5.png)
 
 ---
 
-## 5. Приватная VM
-
-Создана VM `private-vm`.
-
-Параметры:
-
-* внутренний IP: `192.168.20.10`
-* подсеть: `private`
-* публичный IP отсутствует
-* NAT на сетевом интерфейсе отключён.
-
-Конфигурация находится в [`private-vm.tf`](./private-vm.tf).
-
----
-
-## 6. Проверка доступа к private-vm
-
-Доступ к приватной VM выполняется через публичную VM с использованием SSH Jump Host:
-
-```bash
-ssh -i ~/.ssh/id_ed25519 \
-  -J ubuntu@84.201.156.87 \
-  ubuntu@192.168.20.10
-```
-
-Таким образом, приватный SSH-ключ остаётся на локальном компьютере и не копируется на `public-vm`.
-
-![SSH через Jump Host](./img/img6.png)
-
----
-
-## 7. Проверка NAT
-
-На `private-vm` проверены:
-
-```bash
-curl 2ip.me
-```
-
-Private VM имеет адрес:
-
-```text
-192.168.20.10
-```
-
-При этом внешний адрес при обращении в Интернет:
-
-```text
-62.84.119.222
-```
-
-Это подтверждает, что трафик из приватной подсети выходит в Интернет через NAT-инстанс.
-
-![Проверка Internet через NAT](./img/img5.png)
-
----
-
-## 8. Terraform state
-
-Список ресурсов, которыми управляет Terraform:
-
-```text
-data.yandex_compute_image.ubuntu
-yandex_compute_instance.nat
-yandex_compute_instance.private
-yandex_compute_instance.public
-yandex_vpc_network.homework
-yandex_vpc_route_table.private
-yandex_vpc_subnet.private
-yandex_vpc_subnet.public
-```
-
-![Terraform state list](./img/img1.png)
-
----
-
-## 9. Terraform outputs
-
-Текущие outputs:
-
-```text
-nat_public_ip = "62.84.119.222"
-public_vm_ip  = "84.201.156.87"
-```
-
-![Terraform output](./img/img3.png)
-
----
-
-## 10. Проверка Terraform
-
-Финальная команда:
-
-```bash
-terraform plan
-```
-
-Результат:
-
-```text
-No changes. Your infrastructure matches the configuration.
-```
-
-Это подтверждает, что фактическое состояние инфраструктуры соответствует Terraform-конфигурации.
-
-![Terraform plan](./img/img2.png)
----
-
-## 11. Манифесты Terraform
+## 7. Манифесты Terraform
 
 В репозитории находятся исходные Terraform-манифесты:
 
 * [`versions.tf`](./versions.tf) — версии Terraform и провайдера
 * [`provider.tf`](./provider.tf) — настройка Yandex Cloud provider
 * [`variables.tf`](./variables.tf) — переменные
-* [`network.tf`](./network.tf) — VPC и подсети
-* [`route.tf`](./route.tf) — таблица маршрутизации
-* [`nat.tf`](./nat.tf) — NAT-инстанс
-* [`public-vm.tf`](./public-vm.tf) — публичная VM
-* [`private-vm.tf`](./private-vm.tf) — приватная VM
+* [`network.tf`](./network.tf) — VPC и публичная подсеть
+* [`storage.tf`](./storage.tf) — бакет Object Storage, SA, статический ключ
+* [`instance-group.tf`](./instance-group.tf) — группа ВМ с LAMP, health check
+* [`loadbalancer.tf`](./loadbalancer.tf) — сетевой балансировщик
 * [`outputs.tf`](./outputs.tf) — Terraform outputs
+* [`files/user-data.yaml`](./files/user-data.yaml) — cloud-init шаблон для веб-страницы
+* [`files/image.jpg`](./files/image.jpg) — картинка для загрузки в бакет
 
 Секретные значения и Terraform state в репозиторий не добавляются.
 
 ---
 
-## 12. Итог
+## 9. Итог
 
 В результате создана следующая инфраструктура:
 
-| Ресурс         | Параметры                          |
-| -------------- | ---------------------------------- |
-| VPC            | `homework-vpc`                     |
-| Public subnet  | `192.168.10.0/24`                  |
-| NAT instance   | `192.168.10.254` / `62.84.119.222` |
-| Public VM      | `84.201.156.87`                    |
-| Private subnet | `192.168.20.0/24`                  |
-| Private VM     | `192.168.20.10`                    |
-| Route          | `0.0.0.0/0 → 192.168.10.254`       |
+| Ресурс             | Параметры                              |
+| ------------------ | -------------------------------------- |
+| VPC                | `homework-vpc`                         |
+| Public subnet      | `192.168.10.0/24`                      |
+| Object Storage     | `netology-homework-lamp-2026`          |
+| Картинка           | `image.jpg` (публичный доступ)         |
+| Instance Group     | `lamp-group` — 3 ВМ, LAMP              |
+| Network LB         | `lamp-load-balancer` — `158.160.140.125`|
 
 Проверено:
 
-* создание инфраструктуры полностью выполняется Terraform;
-* public VM имеет доступ в Интернет;
-* private VM не имеет публичного IP;
-* private VM имеет доступ в Интернет через NAT;
-* внешний IP private VM соответствует публичному IP NAT-инстанса;
-* SSH-доступ к private VM осуществляется через public VM;
+* бакет создан, картинка доступна по публичному URL;
+* группа из 3 ВМ с LAMP-шаблоном работает в публичной подсети;
+* веб-страница на каждой ВМ содержит ссылку на картинку из бакета;
+* HTTP health check настроен и работает;
+* сетевой балансировщик распределяет трафик между ВМ;
+* при удалении ВМ группа автоматически восстанавливает нужное количество;
 * `terraform plan` не обнаруживает изменений.
