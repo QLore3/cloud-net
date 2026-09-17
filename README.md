@@ -138,31 +138,16 @@ https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg
 
 ### Веб-страница через балансировщик
 
-Откройте в браузере:
-
-```
-http://158.160.140.125/
-```
-
-Отобразится страница «Домашнее задание» с картинкой из Object Storage.
+Cтраница «Домашнее задание» с картинкой из Object Storage.
 
 ![Веб-страница через LB](./img/img1.png)
 
 ### Картинка из бакета напрямую
 
-```
-https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg
-```
 
 ![Картинка из бакета](./img/img2.png)
 
 ### Удаление одной ВМ
-
-Удалите одну ВМ из группы через консоль или CLI:
-
-```bash
-yc compute instance delete <instance-id>
-```
 
 После удаления балансировщик перестаёт отправлять трафик на удалённую ВМ. Оставшиеся две ВМ продолжают обрабатывать запросы. Health check подтверждает, что удалённая ВМ недоступна.
 
@@ -178,12 +163,6 @@ Instance Group автоматически создаёт новую ВМ вза�
 
 ## 6. Terraform outputs
 
-```text
-bucket_name = "netology-homework-lamp-2026"
-image_url = "https://storage.yandexcloud.net/netology-homework-lamp-2026/image.jpg"
-lamp_group_instances = ["<id-1>", "<id-2>", "<id-3>"]
-load_balancer_address = [["158.160.140.125"]]
-```
 
 ![Terraform output](./img/img5.png)
 
@@ -208,7 +187,7 @@ load_balancer_address = [["158.160.140.125"]]
 
 ---
 
-## 9. Итог
+## 8. Итог
 
 В результате создана следующая инфраструктура:
 
